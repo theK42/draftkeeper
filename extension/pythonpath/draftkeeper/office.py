@@ -1,4 +1,7 @@
-"""Everything that talks to LibreOffice (UNO). Only importable inside LibreOffice."""
+"""Everything that talks to LibreOffice documents (UNO). Only importable inside LibreOffice.
+
+UI goes through ``make_ui(ctx, doc)`` so tests can substitute a scripted UI.
+"""
 
 import datetime
 import logging
@@ -10,14 +13,21 @@ import uno
 from com.sun.star.beans import PropertyValue
 
 from . import paths
+from .locations import ASK, MOVED, Locations, is_tracked_format
 from .normalize import normalize
-from .store import KIND_AUTO, KIND_MANUAL, DocumentStore
+from .store import (KIND_AUTO, KIND_IMPORTED, KIND_MANUAL, DocumentStore,
+                    NewVersion, version_list)
 
 ID_PROPERTY = "Draftkeeper ID"
 FODT_FILTER = "OpenDocument Text Flat XML"
 REMOVEABLE = 128  # com.sun.star.beans.PropertyAttribute.REMOVEABLE
 
 log = logging.getLogger("draftkeeper")
+
+
+def make_ui(ctx, doc):
+    from .ui import UI
+    return UI(ctx, doc)
 
 
 def setup_logging() -> None:
@@ -28,6 +38,17 @@ def setup_logging() -> None:
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(handler)
     log.setLevel(logging.INFO)
+
+
+def prop(name, value):
+    p = PropertyValue()
+    p.Name, p.Value = name, value
+    return p
+
+
+def fmt_time(ts: int) -> str:
+    d = datetime.datetime.fromtimestamp(ts)
+    return d.strftime("%a %b %d, %Y, %I:%M %p").replace(" 0", " ")
 
 
 # -- document helpers -------------------------------------------------------
@@ -46,17 +67,25 @@ def get_doc_id(doc):
     return None
 
 
-def set_doc_id(doc) -> str:
-    doc_id = str(uuid.uuid4())
+def set_doc_id(doc, doc_id=None) -> str:
+    doc_id = doc_id or str(uuid.uuid4())
     udp = doc.getDocumentProperties().getUserDefinedProperties()
-    udp.addProperty(ID_PROPERTY, REMOVEABLE, doc_id)
+    if udp.getPropertySetInfo().hasPropertyByName(ID_PROPERTY):
+        udp.setPropertyValue(ID_PROPERTY, doc_id)
+    else:
+        udp.addProperty(ID_PROPERTY, REMOVEABLE, doc_id)
     return doc_id
 
 
-def doc_title(doc) -> str:
+def doc_path(doc):
     url = doc.getURL()
-    if url:
-        return os.path.basename(uno.fileUrlToSystemPath(url))
+    return uno.fileUrlToSystemPath(url) if url else None
+
+
+def doc_title(doc) -> str:
+    path = doc_path(doc)
+    if path:
+        return os.path.basename(path)
     return doc.getTitle() if hasattr(doc, "getTitle") else "Untitled"
 
 
@@ -65,26 +94,33 @@ def export_fodt(doc) -> bytes:
     fd, tmp = tempfile.mkstemp(suffix=".fodt", prefix="draftkeeper-")
     os.close(fd)
     try:
-        prop = PropertyValue()
-        prop.Name, prop.Value = "FilterName", FODT_FILTER
-        doc.storeToURL(uno.systemPathToFileUrl(tmp), (prop,))
+        doc.storeToURL(uno.systemPathToFileUrl(tmp), (prop("FilterName", FODT_FILTER),))
         with open(tmp, "rb") as f:
             return f.read()
     finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+        _remove(tmp)
 
 
-def take_snapshot(doc, kind: str, label: str = ""):
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def open_store(doc_id: str) -> DocumentStore:
+    return DocumentStore(paths.repo_dir(doc_id))
+
+
+def take_snapshot(doc, kind: str, label: str = "", extra=None):
     doc_id = get_doc_id(doc)
     if not doc_id:
         return None
     content = normalize(export_fodt(doc))
-    store = DocumentStore(paths.repo_dir(doc_id))
+    store = open_store(doc_id)
     try:
-        commit = store.snapshot(content, kind=kind, label=label, machine=paths.machine_name())
+        commit = store.snapshot(content, kind=kind, label=label, machine=paths.machine_name(),
+                                extra=extra)
         _write_info(doc, doc_id)
         log.info("snapshot %s kind=%s doc=%s -> %s", doc_title(doc), kind, doc_id, commit)
         return commit
@@ -100,36 +136,91 @@ def _write_info(doc, doc_id: str) -> None:
             doc_title(doc), doc.getURL(), paths.machine_name()))
 
 
-# -- event + command entry points ------------------------------------------
+# -- saving + fork detection --------------------------------------------------
+
+_busy = set()  # doc ids we are re-saving ourselves; their save events are ours
 
 
-def on_save_done(doc) -> None:
-    if is_writer(doc) and get_doc_id(doc):
-        take_snapshot(doc, KIND_AUTO)
+def on_save_done(ctx, doc) -> None:
+    if not is_writer(doc):
+        return
+    doc_id = get_doc_id(doc)
+    if not doc_id or doc_id in _busy:
+        return
+    path = doc_path(doc)
+    if path and is_tracked_format(path):
+        locs = Locations(paths.repo_dir(doc_id), paths.machine_name())
+        result = locs.check(path)
+        if result == ASK:
+            others = [p for p in locs.known if os.path.exists(p)]
+            if ask_separate(make_ui(ctx, doc), doc, others[0]):
+                split_off(doc, doc_id, others[0])
+                return
+            locs.remember(path)
+        elif result == MOVED:
+            locs.replace(path)
+        else:
+            locs.remember(path)
+    take_snapshot(doc, KIND_AUTO)
+
+
+def ask_separate(ui, doc, other_path) -> bool:
+    other = os.path.basename(other_path)
+    here = doc_title(doc)
+    return ui.choose(
+        "“%s” started as a copy of “%s”, and both files still exist.\n\n"
+        "Is this a separate document (for example, a chapter you're working on), "
+        "or the same document in another place?" % (here, other),
+        "Separate document", "Same document",
+        title="Separate document?")
+
+
+def split_off(doc, old_id: str, origin_path: str) -> str:
+    """Give ``doc`` its own ID and history, noting where it came from."""
+    new_id = set_doc_id(doc)
+    _busy.add(new_id)
+    try:
+        doc.store()  # persist the new ID; our own save event is ignored via _busy
+    finally:
+        _busy.discard(new_id)
+    Locations(paths.repo_dir(new_id), paths.machine_name()).remember(doc_path(doc))
+    take_snapshot(doc, KIND_MANUAL, "Started as a copy of " + os.path.basename(origin_path),
+                  extra={"Derived-From": old_id})
+    log.info("split %s off from %s as %s", doc_title(doc), old_id, new_id)
+    return new_id
+
+
+# -- commands -------------------------------------------------------------------
+
+
+def ensure_tracked(ui, doc) -> bool:
+    """Turn history on for ``doc`` if needed (asks first). True if tracked afterwards."""
+    if not is_writer(doc):
+        ui.message("Draftkeeper works with Writer documents.")
+        return False
+    if get_doc_id(doc):
+        return True
+    if not doc.hasLocation() or doc.isReadonly():
+        ui.message("Please save this document first (File › Save), then try again.")
+        return False
+    if not ui.confirm(
+        "Start keeping history for “%s”?\n\n"
+        "From now on, every time you save, a snapshot is kept automatically. "
+        "Use the Restore Point button any time to make a named restore point." % doc_title(doc)
+    ):
+        return False
+    set_doc_id(doc)
+    doc.store()  # persists the ID; the save hook records the first snapshot
+    take_snapshot(doc, KIND_MANUAL, "History started")
+    ui.notify("History is on for this document.")
+    return True
 
 
 def new_restore_point(ctx, doc) -> None:
-    ui = UI(ctx, doc)
-    if not is_writer(doc):
-        ui.message("Draftkeeper works with Writer documents.")
+    ui = make_ui(ctx, doc)
+    was_tracked = is_writer(doc) and get_doc_id(doc)
+    if not ensure_tracked(ui, doc) or not was_tracked:
         return
-
-    if not get_doc_id(doc):
-        if not doc.hasLocation() or doc.isReadonly():
-            ui.message("Please save this document first (File › Save), then try again.")
-            return
-        if not ui.confirm(
-            "Start keeping history for “%s”?\n\n"
-            "From now on, every time you save, a snapshot is kept automatically. "
-            "Use this button any time to make a named restore point." % doc_title(doc)
-        ):
-            return
-        set_doc_id(doc)
-        doc.store()  # persists the ID; the save hook records the first snapshot
-        take_snapshot(doc, KIND_MANUAL, "History started")
-        ui.notify("History is on for this document.")
-        return
-
     default = "Restore point – " + datetime.datetime.now().strftime("%b %d, %Y")
     label = ui.ask("Name this restore point:", default)
     if label is None:
@@ -138,93 +229,109 @@ def new_restore_point(ctx, doc) -> None:
     ui.notify("Restore point saved: " + (label or default))
 
 
-def show_info(ctx, doc) -> None:
-    ui = UI(ctx, doc)
-    doc_id = get_doc_id(doc) if is_writer(doc) else None
-    if not doc_id:
-        ui.message("History is not on for this document yet.\nClick “Restore Point” to turn it on.")
+def describe(s, every_save: bool) -> str:
+    when = fmt_time(s.timestamp)
+    where = "  ·  " + s.machine if s.machine else ""
+    if s.kind == KIND_MANUAL:
+        return "★ %s  —  %s%s" % (s.label, when, where)
+    if s.kind == KIND_IMPORTED:
+        return "◆ %s  —  %s (imported)" % (s.label, when)
+    return "%s  —  %s%s" % ("Saved" if every_save else "End of day", when, where)
+
+
+def show_versions(ctx, doc) -> None:
+    ui = make_ui(ctx, doc)
+    if not is_writer(doc) or not get_doc_id(doc):
+        ui.message("History is not on for this document yet.\n"
+                   "Click “Restore Point” to turn it on.")
         return
-    store = DocumentStore(paths.repo_dir(doc_id))
+    doc_id = get_doc_id(doc)
+    store = open_store(doc_id)
     try:
         snaps = store.history()
+        named = sum(1 for s in snaps if s.is_named)
+        header = "%s: %d saved versions, %d named." % (doc_title(doc), len(snaps), named)
+
+        def rows(every_save):
+            return [(describe(s, every_save), s) for s in version_list(snaps, every_save)]
+
+        chosen = ui.pick_version(header, rows)
+        if chosen is not None:
+            open_copy(ctx, store, chosen, doc_title(doc))
     finally:
         store.close()
-    manual = [s for s in snaps if s.kind == KIND_MANUAL]
-    lines = ["%d snapshots, %d named restore points." % (len(snaps), len(manual)), ""]
-    for s in manual[:10]:
-        when = datetime.datetime.fromtimestamp(s.timestamp).strftime("%b %d, %Y %I:%M %p")
-        lines.append("• %s  (%s, %s)" % (s.label, when, s.machine))
-    lines += ["", "Stored in: " + paths.repo_dir(doc_id)]
-    ui.message("\n".join(lines))
 
 
-# -- small UI toolkit ---------------------------------------------------------
+def open_copy(ctx, store, snap, title: str):
+    """Open ``snap`` as a new, untitled document. Returns the new document."""
+    content = store.read(snap.commit_id)
+    fd, tmp = tempfile.mkstemp(suffix=".fodt", prefix="draftkeeper-version-")
+    with os.fdopen(fd, "wb") as f:
+        f.write(content)
+    try:
+        desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+        copy = desktop.loadComponentFromURL(
+            uno.systemPathToFileUrl(tmp), "_blank", 0, (prop("AsTemplate", True),))
+    finally:
+        _remove(tmp)
+    # The copy keeps the document's ID on purpose: saving it over the original
+    # continues the history (a restore); saving it elsewhere asks "separate?".
+    what = "“%s”, " % snap.label if snap.is_named else ""
+    make_ui(ctx, copy).notify(
+        "This is a copy of %s as of %s%s. Your document hasn't changed. "
+        "To keep this copy, use File › Save As." % (title, what, fmt_time(snap.timestamp)),
+        doc=copy)
+    return copy
 
 
-class UI:
-    def __init__(self, ctx, doc):
-        self.ctx = ctx
-        self.doc = doc
-        smgr = ctx.ServiceManager
-        self.toolkit = smgr.createInstanceWithContext("com.sun.star.awt.Toolkit", ctx)
+def import_versions(ctx, doc, files=None) -> int:
+    """Bring older files (e.g. "Novel final FINAL.odt") into the history, dated by file time."""
+    ui = make_ui(ctx, doc)
+    if not ensure_tracked(ui, doc):
+        return 0
+    if files is None:
+        files = ui.pick_files("Choose older versions of “%s”" % doc_title(doc))
+    own = os.path.normcase(doc_path(doc) or "")
+    files = [f for f in files if os.path.normcase(f) != own]
+    if not files:
+        return 0
+
+    dated = sorted((int(os.path.getmtime(f)), f) for f in files)
+    first, last = fmt_time(dated[0][0]), fmt_time(dated[-1][0])
+    if not ui.confirm(
+        "Add %d older version%s to the history of “%s”?\n\n"
+        "They'll be dated by each file's last-modified time (%s to %s) "
+        "and labeled with the file name. The files themselves aren't changed."
+        % (len(dated), "" if len(dated) == 1 else "s", doc_title(doc), first, last)
+    ):
+        return 0
+
+    desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+    versions, failed = [], []
+    for when, path in dated:
         try:
-            self.window = doc.getCurrentController().getFrame().getContainerWindow()
-        except Exception:
-            self.window = None
-
-    def _box(self, kind, buttons, text):
-        box_type = uno.Enum("com.sun.star.awt.MessageBoxType", kind)
-        box = self.toolkit.createMessageBox(self.window, box_type, buttons, "Draftkeeper", text)
-        return box.execute()
-
-    def message(self, text: str) -> None:
-        self._box("INFOBOX", 1, text)  # BUTTONS_OK
-
-    def confirm(self, text: str) -> bool:
-        return self._box("QUERYBOX", 3, text) == 2  # BUTTONS_YES_NO -> YES
-
-    def notify(self, text: str) -> None:
-        """Non-blocking infobar at the top of the document; falls back to a box."""
-        try:
-            ctrl = self.doc.getCurrentController()
-            ident = "draftkeeper"
+            other = desktop.loadComponentFromURL(
+                uno.systemPathToFileUrl(path), "_blank", 0,
+                (prop("Hidden", True), prop("ReadOnly", True)))
             try:
-                ctrl.removeInfobar(ident)
-            except Exception:
-                pass
-            ctrl.appendInfobar(ident, "Draftkeeper", text, 1, (), True)  # 1 = InfobarType.SUCCESS
+                content = normalize(export_fodt(other))
+            finally:
+                other.close(True)
+            versions.append(NewVersion(when, content, KIND_IMPORTED, os.path.basename(path),
+                                       paths.machine_name()))
         except Exception:
-            self.message(text)
+            log.exception("import failed for %s", path)
+            failed.append(os.path.basename(path))
 
-    def ask(self, prompt: str, default: str = ""):
-        """Single-line text input. Returns the text, or None if cancelled."""
-        smgr = self.ctx.ServiceManager
-        model = smgr.createInstanceWithContext("com.sun.star.awt.UnoControlDialogModel", self.ctx)
-        model.Title = "New Restore Point"
-        model.Width, model.Height = 220, 62
-
-        def add(kind, name, **props):
-            m = model.createInstance("com.sun.star.awt.UnoControl%sModel" % kind)
-            for k, v in props.items():
-                setattr(m, k, v)
-            model.insertByName(name, m)
-
-        add("FixedText", "prompt", PositionX=8, PositionY=8, Width=204, Height=10, Label=prompt)
-        add("Edit", "label", PositionX=8, PositionY=20, Width=204, Height=14, Text=default)
-        add("Button", "ok", PositionX=110, PositionY=42, Width=48, Height=14, Label="Save",
-            PushButtonType=1, DefaultButton=True)  # OK
-        add("Button", "cancel", PositionX=164, PositionY=42, Width=48, Height=14, Label="Cancel",
-            PushButtonType=2)  # CANCEL
-
-        dialog = smgr.createInstanceWithContext("com.sun.star.awt.UnoControlDialog", self.ctx)
-        dialog.setModel(model)
-        dialog.createPeer(self.toolkit, self.window)
-        edit = dialog.getControl("label")
-        edit.setSelection(uno.createUnoStruct("com.sun.star.awt.Selection", 0, len(default)))
-        edit.setFocus()
-        try:
-            if dialog.execute() != 1:
-                return None
-            return edit.getText().strip()
-        finally:
-            dialog.dispose()
+    store = open_store(get_doc_id(doc))
+    try:
+        added = store.insert_versions(versions)
+    finally:
+        store.close()
+    log.info("imported %d versions into %s", added, get_doc_id(doc))
+    note = "Imported %d older version%s." % (added, "" if added == 1 else "s")
+    if failed:
+        ui.message(note + "\n\nThese files couldn't be opened:\n" + "\n".join(failed))
+    else:
+        ui.notify(note + " See them under Versions.")
+    return added

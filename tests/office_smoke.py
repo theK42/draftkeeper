@@ -121,7 +121,93 @@ def main(*args):
               reopened.getText().getString() == text.getString(),
               repr(reopened.getText().getString()))
         reopened.close(True)
+
+        # ---- Phase 2: scripted UI stands in for dialogs ----
+        import shutil
+        from draftkeeper import office
+        ctx = XSCRIPTCONTEXT.getComponentContext()
+
+        class FakeUI:
+            def __init__(self):
+                self.calls, self.answers = [], []
+            def choose(self, text, first, second, title=""):
+                self.calls.append(("choose", text))
+                return self.answers.pop(0)
+            def confirm(self, text):
+                self.calls.append(("confirm", text)); return True
+            def message(self, text): self.calls.append(("message", text))
+            def notify(self, text, doc=None): self.calls.append(("notify", text))
+        fake = FakeUI()
+        office.make_ui = lambda c, d: fake
+        def chooses():
+            return sum(1 for c in fake.calls if c[0] == "choose")
+        load = lambda p: desktop.loadComponentFromURL(uno.systemPathToFileUrl(p), "_blank", 0, (hidden,))
+
+        # Open as copy
+        s = DocumentStore(repo); oldest = s.history()[-1]
+        copy = office.open_copy(ctx, s, oldest, "Novel.odt"); s.close()
+        check("open as copy: untitled, old text, keeps ID",
+              copy.getURL() == "" and copy.getText().getString() == "It was a dark and stormy night."
+              and office.get_doc_id(copy) == "smoke-test-id",
+              repr((copy.getURL(), copy.getText().getString())))
+        copy.close(True)
+
+        # Finder-style copy, answered "same document": joins the novel's history, asked once
+        novel_path = os.path.join(work, "Novel.odt")
+        stick = os.path.join(work, "stick"); os.makedirs(stick)
+        shutil.copy(novel_path, os.path.join(stick, "Novel.odt"))
+        other = load(os.path.join(stick, "Novel.odt"))
+        before = count(repo)
+        fake.answers = [False]
+        other.getText().setString("Edited on the thumb drive.")
+        other.store()
+        check("same-document copy: asked, snapshot joins history",
+              chooses() == 1 and count(repo) == before + 1, "chooses=%d" % chooses())
+        other.getText().setString("Edited on the thumb drive again.")
+        other.store()
+        check("same-document copy: not asked twice", chooses() == 1 and count(repo) == before + 2)
+        other.close(True)
+
+        # Save As for a chapter, answered "separate document": new ID and history
+        before = count(repo)
+        fake.answers = [True]
+        doc.getText().setString("Chapter 12 only.")
+        chapter_path = os.path.join(work, "Chapter 12.odt")
+        doc.storeAsURL(uno.systemPathToFileUrl(chapter_path), ())
+        new_id = office.get_doc_id(doc)
+        new_repo = os.path.join(docs, str(new_id) + ".git")
+        ok = new_id != "smoke-test-id" and os.path.isdir(new_repo) and count(repo) == before
+        detail = "id=%s repo_exists=%s novel_count=%d->%d" % (new_id, os.path.isdir(new_repo), before, count(repo))
+        if os.path.isdir(new_repo):
+            s = DocumentStore(new_repo); h = s.history(); s.close()
+            ok = ok and len(h) == 1 and h[0].extra.get("Derived-From") == "smoke-test-id"
+            detail += " hist=%r" % [(x.label, x.extra) for x in h]
+        check("separate document: own ID + history, novel untouched", ok, detail)
         doc.close(True)
+        reloaded = load(chapter_path)
+        check("separate document: new ID saved in the file", office.get_doc_id(reloaded) == new_id)
+        reloaded.close(True)
+
+        # Import older files, dated by modification time
+        novel = load(novel_path)
+        olds = []
+        for i, words in enumerate(["First draft.", "Second draft, final final."]):
+            d = desktop.loadComponentFromURL("private:factory/swriter", "_blank", 0, (hidden,))
+            d.getText().setString(words)
+            p = os.path.join(work, "Novel v%d.odt" % (i + 1))
+            d.storeAsURL(uno.systemPathToFileUrl(p), ()); d.close(True)
+            t = time.time() - (60 - i * 10) * 86400
+            os.utime(p, (t, t)); olds.append(p)
+        before = count(repo)
+        added = office.import_versions(ctx, novel, files=olds)
+        s = DocumentStore(repo); h = s.history()
+        bottom = [(x.kind, x.label) for x in h[-2:]]
+        oldest_text = extract_text(s.read(h[-1].commit_id)); s.close()
+        check("import: two versions added at the start of history",
+              added == 2 and count(repo) == before + 2
+              and bottom == [("imported", "Novel v2.odt"), ("imported", "Novel v1.odt")]
+              and oldest_text == "First draft.", "added=%r bottom=%r text=%r" % (added, bottom, oldest_text))
+        novel.close(True)
     except Exception:
         check("macro ran without error", False, traceback.format_exc())
     finally:

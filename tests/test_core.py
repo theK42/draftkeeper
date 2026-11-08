@@ -15,7 +15,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "extension", "pythonpath"))
 
 from draftkeeper.normalize import extract_text, normalize  # noqa: E402
-from draftkeeper.store import KIND_AUTO, KIND_MANUAL, DocumentStore  # noqa: E402
+from draftkeeper.locations import ASK, KNOWN, MOVED, Locations  # noqa: E402
+from draftkeeper.store import (KIND_AUTO, KIND_IMPORTED, KIND_MANUAL,  # noqa: E402
+                               DocumentStore, NewVersion, version_list)
 
 HEADER = (
     '<?xml version="1.0" encoding="UTF-8"?>'
@@ -170,6 +172,83 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(fsck.returncode, 0, fsck.stdout + fsck.stderr)
         # Without deltas this would be ~200 x compressed size; demand real delta compression.
         self.assertLess(repo_bytes, 10 * sizes[-1])
+
+
+DAY = 86400
+T0 = 1_760_000_000  # a fixed moment; tests below only care about relative times
+
+
+class ImportTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="dk-test-")
+        self.store = DocumentStore(os.path.join(self.dir, "doc.git"))
+
+    def tearDown(self):
+        self.store.close()
+        shutil.rmtree(self.dir)
+
+    def test_older_versions_go_underneath(self):
+        self.store.snapshot(b"today", kind=KIND_MANUAL, label="History started", when=T0)
+        self.store.snapshot(b"today edited", when=T0 + 60)
+        added = self.store.insert_versions([
+            NewVersion(T0 - 30 * DAY, b"draft", label="Novel.odt"),
+            NewVersion(T0 - 2 * DAY, b"final final", label="Novel final final.odt"),
+        ])
+        self.assertEqual(added, 2)
+        hist = self.store.history()
+        self.assertEqual([h.label for h in hist],
+                         ["Saved", "History started", "Novel final final.odt", "Novel.odt"])
+        self.assertEqual([h.kind for h in hist][2:], [KIND_IMPORTED, KIND_IMPORTED])
+        self.assertEqual(self.store.read(hist[0].commit_id), b"today edited")
+        self.assertEqual(self.store.read(hist[3].commit_id), b"draft")
+
+    def test_import_into_empty_history_and_trailers_survive(self):
+        self.store.snapshot(b"x", kind=KIND_MANUAL, label="Split", when=T0,
+                            extra={"Derived-From": "abc"})
+        self.store.insert_versions([NewVersion(T0 - DAY, b"old", label="old.odt")])
+        hist = self.store.history()
+        self.assertEqual(hist[0].extra, {"Derived-From": "abc"})
+        self.assertEqual(len(hist), 2)
+
+
+class VersionListTests(unittest.TestCase):
+    def snap(self, ts, kind=KIND_AUTO, label="Saved"):
+        from draftkeeper.store import Snapshot
+        return Snapshot(commit_id=str(ts), timestamp=ts, kind=kind, label=label, machine="m")
+
+    def test_named_plus_last_save_per_day(self):
+        import datetime
+        noon = int(datetime.datetime(2026, 11, 3, 12, 0).timestamp())
+        snaps = [  # newest first
+            self.snap(noon + DAY + 3600),                       # Nov 4, last save
+            self.snap(noon + DAY),                              # Nov 4, earlier
+            self.snap(noon + 7200, KIND_MANUAL, "Sent to agent"),  # Nov 3, named
+            self.snap(noon + 3600),                             # Nov 3, auto (not end of day)
+            self.snap(noon - DAY, KIND_IMPORTED, "final.odt"),  # Nov 2, imported
+        ]
+        shown = version_list(snaps)
+        self.assertEqual([s.timestamp for s in shown], [noon + DAY + 3600, noon + 7200, noon - DAY])
+        self.assertEqual(len(version_list(snaps, every_save=True)), 5)
+
+
+class LocationTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="dk-test-")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def test_fork_decisions(self):
+        locs = Locations(self.dir, "mac")
+        self.assertEqual(locs.check("/a/Novel.odt"), KNOWN)  # first sighting
+        locs.remember("/a/Novel.odt")
+        self.assertEqual(locs.check("/a/Novel.odt"), KNOWN)
+        exists = {"/a/Novel.odt"}.__contains__
+        self.assertEqual(locs.check("/a/Chapter 12.odt", exists), ASK)
+        self.assertEqual(locs.check("/b/Novel.odt", lambda p: False), MOVED)
+        locs.remember("/Volumes/STICK/Novel.odt")  # "same document"
+        self.assertEqual(Locations(self.dir, "mac").check("/Volumes/STICK/Novel.odt", exists), KNOWN)
+        self.assertEqual(Locations(self.dir, "pc").check("C:/Novel.odt"), KNOWN)  # per machine
 
 
 if __name__ == "__main__":

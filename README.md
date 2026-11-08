@@ -2,17 +2,28 @@
 
 Restore points and full history for LibreOffice Writer documents, stored as git.
 
-## Phase 1 (this version)
+## What it does
+
+See [ROADMAP.md](ROADMAP.md) for phases. Implemented so far:
 
 - **Restore Point** toolbar button (also *Tools › Add-Ons › Draftkeeper*).
   - First click on a document turns history on: writes a `Draftkeeper ID` into
     *File › Properties › Custom Properties* so every copy of the file is recognized.
   - After that, it asks for a label ("Sent to agent") and records a named restore point.
 - **Every save** of a tracked document records a snapshot automatically
-  (identical content is skipped). That covers the "daily" restore point; the history
-  UI (Phase 3) will group snapshots by day.
-- *Draftkeeper › History Info…* shows counts and recent restore points.
-- Untracked documents are never touched.
+  (saves with no edits are skipped). Untracked documents are never touched.
+- **Versions** button: named restore points, imported files, and the last save of each
+  day ("daily restore point"); tick *Show every save* for all. *Open as Copy* (or
+  double-click) opens that version as a new untitled document.
+  The copy keeps the ID, so saving it over the original continues the history (a restore).
+- **Fork detection**: when a tracked document is saved at a new path while its known
+  copy still exists, it asks once: *Separate document* (new ID and history, noting
+  `Derived-From`) or *Same document* (path remembered, history shared). If every known
+  copy is gone, it's treated as a move. Paths are kept per machine in `locations.json`.
+  Only `.odt`/`.fodt` paths count, so Save As `.docx` exports don't ask.
+- **Import Older Versions…** (menu): pick old files ("Novel final FINAL.odt", .docx too);
+  they're added underneath the existing history, dated by file modification time and
+  labeled with the file name.
 
 History lives in one bare git repo per document:
 

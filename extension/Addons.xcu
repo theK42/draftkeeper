@@ -12,6 +12,12 @@
           <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
           <prop oor:name="Context" oor:type="xs:string"><value>com.sun.star.text.TextDocument</value></prop>
         </node>
+        <node oor:name="m2" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string"><value>service:com.draftkeeper.Commands?versions</value></prop>
+          <prop oor:name="Title" oor:type="xs:string"><value>Versions</value></prop>
+          <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
+          <prop oor:name="Context" oor:type="xs:string"><value>com.sun.star.text.TextDocument</value></prop>
+        </node>
       </node>
     </node>
     <node oor:name="AddonMenu">
@@ -25,8 +31,13 @@
             <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
           </node>
           <node oor:name="m2" oor:op="replace">
-            <prop oor:name="URL" oor:type="xs:string"><value>service:com.draftkeeper.Commands?info</value></prop>
-            <prop oor:name="Title" oor:type="xs:string"><value>History Info…</value></prop>
+            <prop oor:name="URL" oor:type="xs:string"><value>service:com.draftkeeper.Commands?versions</value></prop>
+            <prop oor:name="Title" oor:type="xs:string"><value>Versions…</value></prop>
+            <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
+          </node>
+          <node oor:name="m3" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string"><value>service:com.draftkeeper.Commands?import</value></prop>
+            <prop oor:name="Title" oor:type="xs:string"><value>Import Older Versions…</value></prop>
             <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
           </node>
         </node>

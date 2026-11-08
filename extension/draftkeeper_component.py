@@ -39,12 +39,14 @@ class Commands(unohelper.Base, XJobExecutor):
             doc = desktop.getCurrentComponent()
             if command == "restorepoint":
                 office.new_restore_point(self.ctx, doc)
-            elif command == "info":
-                office.show_info(self.ctx, doc)
+            elif command == "versions":
+                office.show_versions(self.ctx, doc)
+            elif command == "import":
+                office.import_versions(self.ctx, doc)
         except Exception:
             office.log.error("command %s failed:\n%s", command, traceback.format_exc())
             try:
-                office.UI(self.ctx, doc).message(
+                office.make_ui(self.ctx, doc).message(
                     "Something went wrong. Details are in the Draftkeeper log.")
             except Exception:
                 pass
@@ -56,7 +58,7 @@ class SaveJob(unohelper.Base, XJob):
 
     def execute(self, args):
         try:
-            office.on_save_done(_doc_from_env(args))
+            office.on_save_done(self.ctx, _doc_from_env(args))
         except Exception:
             office.log.error("save snapshot failed:\n%s", traceback.format_exc())
         return None

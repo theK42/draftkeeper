@@ -24,7 +24,7 @@ Platforms: macOS (Apple Silicon) and Windows now; Linux later, untested for now.
 **Daily restore point** is covered by snapshots on save. The version list shows
 the last save of each day alongside named restore points. There is no separate timer.
 
-## Phase 2: ready for her to use on one machine
+## Phase 2: ready for her to use on one machine (built; GUI + Windows checks pending)
 
 - Version list: named restore points and end-of-day versions (optionally every save),
   with "Open as copy"
