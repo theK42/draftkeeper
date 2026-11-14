@@ -13,9 +13,11 @@ import uno
 from com.sun.star.beans import PropertyValue
 
 from . import paths
+from .config import Config
 from .locations import ASK, MOVED, Locations, is_tracked_format
+from .sync import is_ancestor, is_shared, sync_document
 from .normalize import normalize, text_key
-from .store import (KIND_AUTO, KIND_IMPORTED, KIND_MANUAL, DocumentStore,
+from .store import (KIND_AUTO, KIND_IMPORTED, KIND_MANUAL, KIND_MERGE, DocumentStore,
                     NewVersion, version_list)
 
 ID_PROPERTY = "Draftkeeper ID"
@@ -119,13 +121,22 @@ def take_snapshot(doc, kind: str, label: str = "", extra=None):
     content = normalize(export_fodt(doc))
     store = open_store(doc_id)
     try:
-        commit = store.snapshot(content, kind=kind, label=label, machine=paths.machine_name(),
+        commit = store.snapshot(content, kind=kind, label=label, machine=Config().machine_name,
                                 extra=extra)
         _write_info(doc, doc_id)
+        path = doc_path(doc)
+        if path and not doc.isModified():  # the file on disk now matches the head
+            head = store.head()
+            if head is not None:
+                _locations(doc_id).set_file_commit(path, head.decode())
         log.info("snapshot %s kind=%s doc=%s -> %s", doc_title(doc), kind, doc_id, commit)
         return commit
     finally:
         store.close()
+
+
+def _locations(doc_id: str) -> Locations:
+    return Locations(paths.repo_dir(doc_id), Config().machine_id)
 
 
 def _write_info(doc, doc_id: str) -> None:
@@ -133,7 +144,7 @@ def _write_info(doc, doc_id: str) -> None:
     info = os.path.join(paths.repo_dir(doc_id), "draftkeeper-info.txt")
     with open(info, "w", encoding="utf-8") as f:
         f.write("title: %s\nlast_path: %s\nmachine: %s\n" % (
-            doc_title(doc), doc.getURL(), paths.machine_name()))
+            doc_title(doc), doc.getURL(), Config().machine_name))
 
 
 # -- saving + fork detection --------------------------------------------------
@@ -149,7 +160,7 @@ def on_save_done(ctx, doc) -> None:
         return
     path = doc_path(doc)
     if path and is_tracked_format(path):
-        locs = Locations(paths.repo_dir(doc_id), paths.machine_name())
+        locs = _locations(doc_id)
         result = locs.check(path)
         if result == ASK:
             others = [p for p in locs.known if os.path.exists(p)]
@@ -162,6 +173,9 @@ def on_save_done(ctx, doc) -> None:
         else:
             locs.remember(path)
     take_snapshot(doc, KIND_AUTO)
+    report = sync_doc(doc_id, doc_title(doc))
+    if report and report.head_moved:
+        after_sync_changes(ctx, doc, doc_id, report)
 
 
 def ask_separate(ui, doc, other_path) -> bool:
@@ -183,7 +197,7 @@ def split_off(doc, old_id: str, origin_path: str) -> str:
         doc.store()  # persist the new ID; our own save event is ignored via _busy
     finally:
         _busy.discard(new_id)
-    Locations(paths.repo_dir(new_id), paths.machine_name()).remember(doc_path(doc))
+    _locations(new_id).remember(doc_path(doc))
     take_snapshot(doc, KIND_MANUAL, "Started as a copy of " + os.path.basename(origin_path),
                   extra={"Derived-From": old_id})
     log.info("split %s off from %s as %s", doc_title(doc), old_id, new_id)
@@ -227,6 +241,7 @@ def new_restore_point(ctx, doc) -> None:
         return
     take_snapshot(doc, KIND_MANUAL, label or default)
     ui.notify("Restore point saved: " + (label or default))
+    sync_doc(get_doc_id(doc), doc_title(doc))
 
 
 def describe(s, every_save: bool) -> str:
@@ -234,6 +249,9 @@ def describe(s, every_save: bool) -> str:
     where = "  ·  " + s.machine if s.machine else ""
     if s.kind == KIND_MANUAL:
         return "★ %s  —  %s%s" % (s.label, when, where)
+    if s.kind == KIND_MERGE:
+        return "\u21c4 Combined edits from two computers (kept %s's)  \u2014  %s" % (
+            s.extra.get("Kept") or "the newer", when)
     if s.kind == KIND_IMPORTED:
         return "◆ %s  —  %s (imported)" % (s.label, when)
     return "%s  —  %s%s" % ("Saved" if every_save else "End of day", when, where)
@@ -269,9 +287,7 @@ def open_copy(ctx, store, snap, title: str):
     with os.fdopen(fd, "wb") as f:
         f.write(content)
     try:
-        desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
-        copy = desktop.loadComponentFromURL(
-            uno.systemPathToFileUrl(tmp), "_blank", 0, (prop("AsTemplate", True),))
+        copy = load_internal(ctx, tmp, (prop("AsTemplate", True),))
     finally:
         _remove(tmp)
     # The copy keeps the document's ID on purpose: saving it over the original
@@ -288,6 +304,17 @@ def import_versions(ctx, doc, files=None) -> int:
     """Bring older files (e.g. "Novel final FINAL.odt") into the history, dated by file time."""
     ui = make_ui(ctx, doc)
     if not ensure_tracked(ui, doc):
+        return 0
+    store = open_store(get_doc_id(doc))
+    try:
+        shared = is_shared(store)
+    finally:
+        store.close()
+    if shared:
+        ui.message("Older versions can only be imported before a document is synced to "
+                   "another computer or sync folder, and this one already has been.\n\n"
+                   "(Importing rewrites the history's order, which would make the computers "
+                   "disagree.)")
         return 0
     if files is None:
         files = ui.pick_files("Choose older versions of “%s”" % doc_title(doc))
@@ -310,15 +337,13 @@ def import_versions(ctx, doc, files=None) -> int:
     versions, failed = [], []
     for when, path in dated:
         try:
-            other = desktop.loadComponentFromURL(
-                uno.systemPathToFileUrl(path), "_blank", 0,
-                (prop("Hidden", True), prop("ReadOnly", True)))
+            other = load_internal(ctx, path, (prop("Hidden", True), prop("ReadOnly", True)))
             try:
                 content = normalize(export_fodt(other))
             finally:
                 other.close(True)
             versions.append(NewVersion(when, content, KIND_IMPORTED, os.path.basename(path),
-                                       paths.machine_name()))
+                                       Config().machine_name))
         except Exception:
             log.exception("import failed for %s", path)
             failed.append(os.path.basename(path))
@@ -348,3 +373,233 @@ def import_versions(ctx, doc, files=None) -> int:
     else:
         ui.message(note)
     return added
+
+
+# -- sync ---------------------------------------------------------------------------
+
+_internal = [0]  # >0 while we load documents ourselves (no open-time checks for those)
+
+
+def load_internal(ctx, path, props):
+    desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+    _internal[0] += 1
+    try:
+        return desktop.loadComponentFromURL(uno.systemPathToFileUrl(path), "_blank", 0, props)
+    finally:
+        _internal[0] -= 1
+
+
+def run_later(ctx, fn):
+    """Run ``fn`` on the main thread after the current event finishes."""
+    import unohelper
+    from com.sun.star.awt import XCallback
+
+    class Later(unohelper.Base, XCallback):
+        def notify(self, data):
+            try:
+                fn()
+            except Exception:
+                log.exception("deferred action failed")
+
+    ctx.ServiceManager.createInstanceWithContext(
+        "com.sun.star.awt.AsyncCallback", ctx).addCallback(Later(), None)
+
+
+def sync_doc(doc_id: str, title: str):
+    """Sync one document with every reachable sync folder. None if there are none."""
+    cfg = Config()
+    folders = cfg.reachable()
+    if not folders:
+        return None
+    store = open_store(doc_id)
+    try:
+        report = sync_document(store, doc_id, folders, cfg.machine_id, cfg.machine_name, title)
+    finally:
+        store.close()
+    log.info("sync %s: synced=%s events=%s errors=%s", doc_id, report.synced,
+             [(e.kind, e.machine) for e in report.events], report.errors)
+    return report
+
+
+def newer_version(doc, doc_id: str):
+    """If history has newer work than this file, the newest Snapshot; else None."""
+    path = doc_path(doc)
+    store = open_store(doc_id)
+    try:
+        head = store.head()
+        if head is None or not path:
+            return None
+        locs = _locations(doc_id)
+        saved_as = locs.file_commit(path)
+        if saved_as == head.decode():
+            return None
+        if saved_as and saved_as.encode() in store.repo.object_store:
+            if store._blob_of(saved_as.encode()) == store._blob_of(head):
+                locs.set_file_commit(path, head.decode())  # e.g. a merge that kept this text
+                return None
+            is_older = is_ancestor(store, saved_as.encode(), head)
+        else:
+            # A file this machine hasn't saved (e.g. copied from the thumb drive):
+            # compare its words with recent versions.
+            key = text_key(normalize(export_fodt(doc)))
+            history = store.history()
+            if key == text_key(store.read(history[0].commit_id)):
+                locs.set_file_commit(path, history[0].commit_id)
+                return None
+            is_older = any(key == text_key(store.read(s.commit_id)) for s in history[1:50])
+        return store.history()[0] if is_older else None
+    finally:
+        store.close()
+
+
+def on_load(ctx, doc) -> None:
+    if _internal[0] or not is_writer(doc) or not doc.hasLocation():
+        return
+    doc_id = get_doc_id(doc)
+    if not doc_id:
+        return
+    sync_doc(doc_id, doc_title(doc))
+    offer_newer(ctx, doc, doc_id)
+
+
+def offer_newer(ctx, doc, doc_id: str) -> None:
+    newer = newer_version(doc, doc_id)
+    if newer is None:
+        return
+    who = newer.extra.get("Kept") or newer.machine or "another computer"
+    if make_ui(ctx, doc).choose(
+        "There's newer work on “%s” than this file has: saved on %s, %s.\n\n"
+        "Open the newer version? (This file will be updated to match. "
+        "Nothing is lost: the version you have now stays in Versions.)"
+        % (doc_title(doc), who, fmt_time(newer.timestamp)),
+        "Open newer version", "Keep this one", title="Newer version available"
+    ):
+        run_later(ctx, lambda: open_newer(ctx, doc, doc_id))
+
+
+def open_newer(ctx, doc, doc_id: str):
+    """Replace ``doc``'s file with the newest version and reopen it. Returns the new doc."""
+    path = doc_path(doc)
+    args = {a.Name: a.Value for a in doc.getArgs()}
+    filter_name = args.get("FilterName") or "writer8"
+    store = open_store(doc_id)
+    try:
+        head = store.head().decode()
+        content = store.read(head)
+    finally:
+        store.close()
+    doc.close(True)
+
+    fd, tmp = tempfile.mkstemp(suffix=".fodt", prefix="draftkeeper-newer-")
+    with os.fdopen(fd, "wb") as f:
+        f.write(content)
+    try:
+        newer = load_internal(ctx, tmp, (prop("Hidden", True),))
+        try:
+            newer.storeToURL(uno.systemPathToFileUrl(path),
+                             (prop("FilterName", filter_name), prop("Overwrite", True)))
+        finally:
+            newer.close(True)
+    finally:
+        _remove(tmp)
+    _locations(doc_id).set_file_commit(path, head)
+    reopened = load_internal(ctx, path, ())
+    make_ui(ctx, reopened).notify("Opened the newest version.", doc=reopened)
+    log.info("replaced %s with newer version %s", path, head)
+    return reopened
+
+
+def after_sync_changes(ctx, doc, doc_id: str, report) -> None:
+    """After a save-time sync moved the history: tell her, and offer the newer text if needed."""
+    for e in report.events:
+        if e.kind == "merged":
+            if e.local_won:
+                make_ui(ctx, doc).notify(
+                    "%s also had edits that weren't in this file. Your version here is kept as "
+                    "the current one; %s's edits are saved in Versions." % (e.machine, e.machine))
+                _locations(doc_id).set_file_commit(doc_path(doc), e.head)
+            else:
+                offer_newer(ctx, doc, doc_id)
+            return
+    offer_newer(ctx, doc, doc_id)
+
+
+def on_close(ctx, doc) -> None:
+    if _internal[0] or not is_writer(doc):
+        return
+    doc_id = get_doc_id(doc)
+    if doc_id:
+        sync_doc(doc_id, doc_title(doc))
+
+
+def describe_report(report, cfg) -> str:
+    lines = []
+    if report.synced:
+        lines.append("Synced with: " + ", ".join(report.synced) + ".")
+    reached = set(report.synced)
+    missing = [f.name for f in cfg.folders if f.name not in reached]
+    if missing:
+        lines.append("Not reachable right now: " + ", ".join(missing) + ".")
+    for e in report.events:
+        if e.kind == "fast_forward":
+            lines.append("Brought in newer saves from %s." % e.machine)
+        else:
+            lines.append("Combined edits from %s; kept %s's version as current."
+                         % (e.machine, e.winner_machine))
+    for err in report.errors:
+        lines.append("Problem: " + err)
+    return "\n".join(lines) or "Nothing to sync."
+
+
+def sync_now(ctx, doc) -> None:
+    ui = make_ui(ctx, doc)
+    cfg = Config()
+    if not cfg.folders:
+        ui.message("No sync folders yet. Use Draftkeeper › Add Sync Folder… first.")
+        return
+    if not is_writer(doc) or not get_doc_id(doc):
+        ui.message("History is not on for this document yet.\n"
+                   "Click “Restore Point” to turn it on.")
+        return
+    doc_id = get_doc_id(doc)
+    report = sync_doc(doc_id, doc_title(doc))
+    if report is None:
+        ui.message("None of your sync folders can be reached right now (%s)."
+                   % ", ".join(f.name for f in cfg.folders))
+        return
+    ui.message(describe_report(report, Config()))
+    if report.head_moved and not doc.isModified():
+        offer_newer(ctx, doc, doc_id)
+
+
+def add_sync_folder(ctx, doc, chosen=None, name=None):
+    ui = make_ui(ctx, doc)
+    if chosen is None:
+        chosen = ui.pick_folder("Choose a sync folder (thumb drive, Proton Drive, ...)")
+        if not chosen:
+            return None
+    if name is None:
+        name = ui.ask("Name for this sync folder:", guess_folder_name(chosen), title="Add Sync Folder")
+        if name is None:
+            return None
+    folder = Config().add_folder(chosen, name or guess_folder_name(chosen))
+    msg = "Added “%s” (%s).\nDraftkeeper syncs there whenever it's reachable." % (
+        folder.name, folder.path)
+    if is_writer(doc) and get_doc_id(doc):
+        report = sync_doc(get_doc_id(doc), doc_title(doc))
+        if report:
+            msg += "\n\n" + describe_report(report, Config())
+    ui.message(msg)
+    return folder
+
+
+def guess_folder_name(path: str) -> str:
+    low = path.lower()
+    if "proton" in low:
+        return "Proton Drive"
+    parts = os.path.normpath(path).split(os.sep)
+    if len(parts) > 2 and parts[1] == "Volumes":
+        return parts[2]  # macOS volume name, e.g. the thumb drive's label
+    if len(path) >= 2 and path[1] == ":":
+        return "Drive %s:" % path[0].upper()
+    return os.path.basename(os.path.normpath(path)) or path

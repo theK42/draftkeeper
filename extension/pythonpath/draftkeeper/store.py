@@ -32,6 +32,7 @@ FILE_MODE = 0o100644
 KIND_AUTO = "auto"
 KIND_MANUAL = "manual"
 KIND_IMPORTED = "imported"
+KIND_MERGE = "merge"  # histories from two computers combined (see sync.py)
 NAMED_KINDS = (KIND_MANUAL, KIND_IMPORTED)
 
 TRAILER_PREFIX = "Draftkeeper-"
@@ -253,7 +254,7 @@ def version_list(snapshots: List[Snapshot], every_save: bool = False) -> List[Sn
     out, seen_days = [], set()
     for s in snapshots:  # newest first, so the first auto seen per day is the day's last
         day = datetime.datetime.fromtimestamp(s.timestamp).date()
-        if s.is_named:
+        if s.is_named or s.kind == KIND_MERGE:
             out.append(s)
         elif day not in seen_days:
             out.append(s)

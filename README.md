@@ -25,10 +25,35 @@ See [ROADMAP.md](ROADMAP.md) for phases. Implemented so far:
   they're added underneath the existing history, dated by file modification time and
   labeled with the file name.
 
+- **Sync** through any number of *sync folders* (a thumb drive, a Proton Drive folder, ...):
+  *Draftkeeper › Add Sync Folder…* on each computer. Choosing a folder creates (or reuses) a
+  `Draftkeeper` folder inside it, marked with `draftkeeper-sync.json`; picking the same
+  thumb drive on the second computer finds the same folder. If a drive comes back under a
+  different drive letter, mounted volumes are scanned for it.
+  - Syncs on open, save, restore point and close, and with *Sync Now*. Only while
+    LibreOffice is running.
+  - Each computer writes only its own file per document:
+    `documents/<doc id>/<machine id>.bundle` (a standard git bundle, written atomically),
+    so cloud sync clients never see two writers.
+  - **On open**, if there's newer work than the file has, she's asked
+    *Open newer version* / *Keep this one*. Opening it rewrites the file with the newest version.
+  - **If both computers edited** without syncing, the newer side's text becomes current and
+    the other side's edits stay in history (shown as "Combined edits from two computers"
+    in Versions). Phase 5 will offer them as tracked changes instead.
+  - Import Older Versions is refused once a document has synced (it rewrites history).
+
+### Setting up sync for her
+
+1. On each computer: install the extension, then *Add Sync Folder…* and choose the Proton
+   Drive folder (mark it "available offline" in Proton's app), and again for the thumb drive.
+2. Turn history on for the novel on one computer, save, and let it sync.
+3. On the other computer, open the novel (from the drive or Proton). Its history comes along.
+
 History lives in one bare git repo per document:
 
 - macOS: `~/Library/Application Support/Draftkeeper/documents/<id>.git`
 - Windows: `%APPDATA%\Draftkeeper\documents\<id>.git`
+- machine identity and sync folders: `config.json` in the same data folder
 - override with `DRAFTKEEPER_HOME`
 
 Each commit holds `document.fodt`: Flat ODT, normalized to one paragraph per line with

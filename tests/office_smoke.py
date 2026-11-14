@@ -217,6 +217,112 @@ def main(*args):
               added == 0 and count(repo) == before and last[0] == "message"
               and "3 files were already in the history" in last[1], "added=%r last=%r" % (added, last))
         novel.close(True)
+
+        # ---- Phase 3: two machines in one LibreOffice; DRAFTKEEPER_HOME picks the machine ----
+        from draftkeeper.config import Config
+        def be(h, name):
+            os.environ["DRAFTKEEPER_HOME"] = h
+            c = Config(); c.data["machine_name"] = name; c.save()
+        pending = []
+        office.run_later = lambda c, fn: pending.append(fn)
+        def notes():
+            return [c[1] for c in fake.calls if c[0] in ("notify", "message")]
+        # Visible loads: LibreOffice only sends open events to jobs for visible documents.
+        # Open events reach jobs asynchronously, so let LibreOffice process them before checking.
+        toolkit = ctx.ServiceManager.createInstanceWithContext("com.sun.star.awt.Toolkit", ctx)
+        def loadv(p):
+            d = desktop.loadComponentFromURL(uno.systemPathToFileUrl(p), "_blank", 0, ())
+            toolkit.processEventsToIdle()
+            return d
+        home_a, home_b = home, os.path.join(work, "dkhome-b")
+        drive = os.path.join(work, "drive"); os.makedirs(drive)
+
+        be(home_a, "Mac")
+        novel = loadv(novel_path)
+        # Earlier checks left newer history (the thumb-drive copy's edits) than this file;
+        # save so the file is the latest before it goes to the PC.
+        novel.getText().setString("Mac, ready to travel.")
+        novel.store()
+        office.add_sync_folder(ctx, novel, chosen=drive, name="Thumb drive")
+        bundle_a = os.path.join(drive, "Draftkeeper", "documents", "smoke-test-id",
+                                Config().machine_id + ".bundle")
+        check("add sync folder publishes this machine's bundle", os.path.exists(bundle_a))
+        a_count = count(repo)
+        novel.close(True)
+
+        # The PC: the novel arrives on the thumb drive and is copied over
+        be(home_b, "PC")
+        Config().add_folder(os.path.join(drive, "Draftkeeper"), "Thumb drive")
+        pc_dir = os.path.join(work, "pc"); os.makedirs(pc_dir)
+        pc_path = os.path.join(pc_dir, "Novel.odt"); shutil.copy(novel_path, pc_path)
+        fake.calls.clear()
+        pcdoc = loadv(pc_path)
+        repo_b = os.path.join(home_b, "documents", "smoke-test-id.git")
+        n_b = count(repo_b) if os.path.isdir(repo_b) else -1
+        check("PC: full history arrives on open, no prompt for an up-to-date file",
+              n_b == a_count and chooses() == 0 and not pending,
+              "b=%d a=%d chooses=%d pending=%d" % (n_b, a_count, chooses(), len(pending)))
+        pcdoc.getText().setString("Written on the PC.")
+        pcdoc.store()
+        pcdoc.close(True)
+
+        # Back on the Mac: opening its older file offers the PC's newer work
+        be(home_a, "Mac")
+        fake.calls.clear(); fake.answers = [True]
+        novel = loadv(novel_path)
+        check("Mac: newer work offered on open", chooses() == 1 and len(pending) == 1,
+              "chooses=%d pending=%d" % (chooses(), len(pending)))
+        reopened = pending.pop()() if pending else None
+        txt = reopened.getText().getString() if reopened else None
+        check("Mac: newer version opened and written to the file", txt == "Written on the PC.", repr(txt))
+        if reopened: reopened.close(True)
+        fake.calls.clear()
+        again = loadv(novel_path)
+        check("Mac: no prompt once up to date", chooses() == 0 and again.getText().getString() == "Written on the PC.")
+
+        # Both edit: the Mac (synced), then the PC without the drive, later
+        again.getText().setString("Mac edit."); again.store(); again.close(True)
+        be(home_b, "PC")
+        unplugged = drive + "-unplugged"; os.rename(drive, unplugged)
+        pcdoc = loadv(pc_path)
+        time.sleep(1.2)
+        pcdoc.getText().setString("PC edit, later."); pcdoc.store()
+        os.rename(unplugged, drive)
+        fake.calls.clear()
+        pcdoc.getText().setString("PC edit, later!"); pcdoc.store()   # drive back: sync combines
+        s = DocumentStore(repo_b); h = s.history(); s.close()
+        kinds = [x.kind for x in h[:1]]
+        check("PC: divergence combined, PC's newer text kept, Mac's edit in history",
+              kinds == ["merge"] and h[0].extra.get("Kept") == "PC"
+              and any("also had edits" in n for n in notes())
+              and any(x.machine == "Mac" and x.label == "Saved" for x in h),
+              "kinds=%r extra=%r notes=%r" % (kinds, h[0].extra if h else None, notes()))
+        pcdoc.close(True)
+        fake.calls.clear()
+        pcdoc = loadv(pc_path)
+        check("PC: no false 'newer version' prompt after a merge that kept its text", chooses() == 0)
+
+        # Import is refused once the history is shared; Sync Now reports
+        fake.calls.clear()
+        added = office.import_versions(ctx, pcdoc, files=olds)
+        check("import refused after sync", added == 0 and any("already has been" in n for n in notes()),
+              repr(notes()))
+        fake.calls.clear()
+        office.sync_now(ctx, pcdoc)
+        toolkit.processEventsToIdle()
+        check("Sync Now reports the folder", any(n.startswith("Synced with: Thumb drive.") for n in notes()),
+              repr(notes()))
+        pcdoc.close(True)
+
+        # The Mac catches up to the combined version
+        be(home_a, "Mac")
+        fake.calls.clear(); fake.answers = [True]
+        mac = loadv(novel_path)
+        reopened = pending.pop()() if pending else None
+        check("Mac: offered and opened the combined version",
+              chooses() == 1 and reopened is not None
+              and reopened.getText().getString() == "PC edit, later!")
+        if reopened: reopened.close(True)
     except Exception:
         check("macro ran without error", False, traceback.format_exc())
     finally:

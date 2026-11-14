@@ -40,6 +40,19 @@
             <prop oor:name="Title" oor:type="xs:string"><value>Import Older Versions…</value></prop>
             <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
           </node>
+          <node oor:name="m4" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string"><value>private:separator</value></prop>
+          </node>
+          <node oor:name="m5" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string"><value>service:com.draftkeeper.Commands?syncnow</value></prop>
+            <prop oor:name="Title" oor:type="xs:string"><value>Sync Now</value></prop>
+            <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
+          </node>
+          <node oor:name="m6" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string"><value>service:com.draftkeeper.Commands?addsync</value></prop>
+            <prop oor:name="Title" oor:type="xs:string"><value>Add Sync Folder…</value></prop>
+            <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
+          </node>
         </node>
       </node>
     </node>

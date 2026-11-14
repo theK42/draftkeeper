@@ -7,7 +7,7 @@ The output is a standard git pack: real git reads it with no special handling.
 """
 
 from difflib import SequenceMatcher
-from typing import Iterator, List
+from typing import Iterator, List, Tuple
 
 from dulwich.pack import (
     UnpackedObject,
@@ -50,6 +50,40 @@ def _offsets(lines: List[bytes]) -> List[int]:
     for line in lines:
         out.append(out[-1] + len(line))
     return out
+
+
+def pack_records(object_store, ordered: List[Tuple[bytes, bool]]) -> Iterator[UnpackedObject]:
+    """Pack records for a bundle. ``ordered``: (hex sha, is_blob), oldest content first.
+
+    Deltas already stored in packs are copied as-is; only objects stored
+    whole (recent loose objects, pack bases) are diffed, each blob against
+    the previous blob in order. That keeps writing a bundle fast on every save.
+    """
+    from dulwich.pack import find_reusable_deltas, full_unpacked_object, sha_to_hex
+
+    reused, reused_bases = set(), set()
+    for unpacked in find_reusable_deltas(object_store, {oid for oid, _ in ordered}):
+        reused.add(sha_to_hex(unpacked.sha()))
+        reused_bases.add(sha_to_hex(unpacked.delta_base))
+        yield unpacked
+
+    prev_blob = None  # hex sha of the previous blob in order
+    for oid, is_blob in ordered:
+        if oid not in reused:
+            obj = object_store[oid]
+            record = full_unpacked_object(obj)
+            # Never turn a reused delta's base into a delta: that could form a cycle.
+            if is_blob and prev_blob is not None and oid not in reused_bases:
+                raw = obj.as_raw_string()
+                delta = list(line_delta(object_store[prev_blob].as_raw_string(), raw))
+                size = sum(map(len, delta))
+                if size < len(raw):
+                    record = UnpackedObject(obj.type_num, sha=obj.sha().digest(),
+                                            delta_base=bytes.fromhex(prev_blob.decode()),
+                                            decomp_len=size, decomp_chunks=delta)
+            yield record
+        if is_blob:
+            prev_blob = oid
 
 
 def pack_loose_objects(object_store) -> int:

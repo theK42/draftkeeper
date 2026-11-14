@@ -38,10 +38,11 @@ the last save of each day alongside named restore points. There is no separate t
 Until Phase 3, she should use Draftkeeper on **one machine only**. Separate
 histories on two machines can be combined later, but it's extra work.
 
-## Phase 3: sync and backup
+## Phase 3: sync and backup (built; needs real two-machine use)
 
-- Thumb drive: a git bundle per document, written atomically (safe to unplug)
-- Network remote (NAS or private repo) as off-site backup that also syncs
+- Generic *sync folders*: thumb drive and Proton Drive (off-site, end-to-end encrypted)
+  use the same code; one git bundle per machine per document, written atomically
+- Divergence stopgap: newer side's text stays current, other side's edits kept in history
 - When she opens a document: "your other computer has newer work. Load it first?"
 
 ## Phase 4: history browser and search

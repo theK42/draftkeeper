@@ -166,6 +166,14 @@ class UI:
         finally:
             dialog.dispose()
 
+    def pick_folder(self, title: str):
+        """Folder picker. Returns a system path or None."""
+        picker = self.smgr.createInstanceWithContext("com.sun.star.ui.dialogs.FolderPicker", self.ctx)
+        picker.setTitle(title)
+        if picker.execute() != 1:
+            return None
+        return uno.fileUrlToSystemPath(picker.getDirectory())
+
     def pick_files(self, title: str):
         """Multi-select file picker for documents. Returns system paths."""
         picker = self.smgr.createInstanceWithArgumentsAndContext(

@@ -65,6 +65,16 @@ class Locations:
         self.data[self.machine] = [path]
         self._save()
 
+    # Which history commit each file on disk was last saved as (per machine), so
+    # opening a file can tell "newer work exists" without re-exporting it.
+
+    def file_commit(self, path: str):
+        return self.data.get("files:" + self.machine, {}).get(os.path.normcase(path))
+
+    def set_file_commit(self, path: str, commit: str) -> None:
+        self.data.setdefault("files:" + self.machine, {})[os.path.normcase(path)] = commit
+        self._save()
+
     def _save(self) -> None:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         tmp = self.path + ".tmp"
