@@ -49,6 +49,7 @@ class Snapshot:
     label: str
     machine: str
     extra: Dict[str, str] = field(default_factory=dict)
+    blob: str = ""  # id of the content; versions with identical text share it
 
     @property
     def is_named(self) -> bool:
@@ -209,7 +210,12 @@ class DocumentStore:
         head = self.head()
         if head is None:
             return []
-        return [_parse_commit(e.commit) for e in self.repo.get_walker(include=[head])]
+        out = []
+        for e in self.repo.get_walker(include=[head]):
+            snap = _parse_commit(e.commit)
+            snap.blob = self.repo[e.commit.tree][DOC_FILENAME][1].decode("ascii")
+            out.append(snap)
+        return out
 
     def read(self, commit_id: str) -> bytes:
         return self.repo[self._blob_of(commit_id.encode("ascii"))].data

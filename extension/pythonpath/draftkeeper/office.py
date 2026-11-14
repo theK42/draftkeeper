@@ -48,9 +48,8 @@ def prop(name, value):
     return p
 
 
-def fmt_time(ts: int) -> str:
-    d = datetime.datetime.fromtimestamp(ts)
-    return d.strftime("%a %b %d, %Y, %I:%M %p").replace(" 0", " ")
+from .browser import VersionsModel, describe, fmt_time  # noqa: E402
+
 
 
 # -- document helpers -------------------------------------------------------
@@ -130,6 +129,8 @@ def take_snapshot(doc, kind: str, label: str = "", extra=None):
             if head is not None:
                 _locations(doc_id).set_file_commit(path, head.decode())
         log.info("snapshot %s kind=%s doc=%s -> %s", doc_title(doc), kind, doc_id, commit)
+        if commit:
+            index_later(doc_id)
         return commit
     finally:
         store.close()
@@ -244,40 +245,49 @@ def new_restore_point(ctx, doc) -> None:
     sync_doc(get_doc_id(doc), doc_title(doc))
 
 
-def describe(s, every_save: bool) -> str:
-    when = fmt_time(s.timestamp)
-    where = "  ·  " + s.machine if s.machine else ""
-    if s.kind == KIND_MANUAL:
-        return "★ %s  —  %s%s" % (s.label, when, where)
-    if s.kind == KIND_MERGE:
-        return "\u21c4 Combined edits from two computers (kept %s's)  \u2014  %s" % (
-            s.extra.get("Kept") or "the newer", when)
-    if s.kind == KIND_IMPORTED:
-        return "◆ %s  —  %s (imported)" % (s.label, when)
-    return "%s  —  %s%s" % ("Saved" if every_save else "End of day", when, where)
-
-
-def show_versions(ctx, doc) -> None:
+def show_versions(ctx, doc):
+    """The Versions window. Returns the document it opened (a copy), if any."""
     ui = make_ui(ctx, doc)
     if not is_writer(doc) or not get_doc_id(doc):
         ui.message("History is not on for this document yet.\n"
-                   "Click “Restore Point” to turn it on.")
+                   "Click \u201cRestore Point\u201d to turn it on.")
         return
-    doc_id = get_doc_id(doc)
-    store = open_store(doc_id)
+    store = open_store(get_doc_id(doc))
     try:
-        snaps = store.history()
-        named = sum(1 for s in snaps if s.is_named)
-        header = "%s: %d saved versions, %d named." % (doc_title(doc), len(snaps), named)
-
-        def rows(every_save):
-            return [(describe(s, every_save), s) for s in version_list(snaps, every_save)]
-
-        chosen = ui.pick_version(header, rows)
-        if chosen is not None:
-            open_copy(ctx, store, chosen, doc_title(doc))
+        model = VersionsModel(store, doc_title(doc))
+        chosen = ui.browse_versions(model.header, model)
+        if chosen is None:
+            return None
+        action, snap = chosen
+        if action == "compare":
+            return compare_with_current(ctx, doc, store, snap)
+        return open_copy(ctx, store, snap, doc_title(doc))
     finally:
         store.close()
+
+
+def compare_with_current(ctx, doc, store, snap):
+    """A copy of the current text, with changes since ``snap`` shown as tracked changes."""
+    old_fd, old_path = tempfile.mkstemp(suffix=".fodt", prefix="draftkeeper-old-")
+    with os.fdopen(old_fd, "wb") as f:
+        f.write(store.read(snap.commit_id))
+    cur_fd, cur_path = tempfile.mkstemp(suffix=".fodt", prefix="draftkeeper-current-")
+    os.close(cur_fd)
+    try:
+        doc.storeToURL(uno.systemPathToFileUrl(cur_path), (prop("FilterName", FODT_FILTER),))
+        copy = load_internal(ctx, cur_path, (prop("AsTemplate", True),))
+        dispatcher = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.DispatchHelper", ctx)
+        dispatcher.executeDispatch(
+            copy.getCurrentController().getFrame(), ".uno:CompareDocuments", "", 0,
+            (prop("URL", uno.systemPathToFileUrl(old_path)), prop("NoAcceptDialog", True)))
+    finally:
+        _remove(old_path)
+        _remove(cur_path)
+    what = "\u201c%s\u201d, " % snap.label if snap.is_named else ""
+    make_ui(ctx, copy).notify(
+        "Changes since %s%s are shown as tracked changes (Edit \u203a Track Changes \u203a Manage). "
+        "This is a copy; your document hasn't changed." % (what, fmt_time(snap.timestamp)), doc=copy)
+    return copy
 
 
 def open_copy(ctx, store, snap, title: str):
@@ -355,6 +365,8 @@ def import_versions(ctx, doc, files=None) -> int:
         store.close()
     skipped = len(versions) - added
     log.info("imported %d versions into %s (%d duplicates skipped)", added, get_doc_id(doc), skipped)
+    if added:
+        index_later(get_doc_id(doc))
 
     if added == 1:
         note = "Imported 1 older version."
@@ -405,6 +417,25 @@ def run_later(ctx, fn):
         "com.sun.star.awt.AsyncCallback", ctx).addCallback(Later(), None)
 
 
+def index_later(doc_id: str) -> None:
+    """Index new versions for search in a background thread (pure Python, no UNO calls)."""
+    import threading
+    from .search import SearchIndex, lock_for, update
+
+    def work():
+        try:
+            store = open_store(doc_id)
+            try:
+                with lock_for(store.repo_dir):
+                    update(SearchIndex(store.repo_dir), store)
+            finally:
+                store.close()
+        except Exception:
+            log.exception("background indexing failed for %s", doc_id)
+
+    threading.Thread(target=work, name="draftkeeper-index", daemon=True).start()
+
+
 def sync_doc(doc_id: str, title: str):
     """Sync one document with every reachable sync folder. None if there are none."""
     cfg = Config()
@@ -418,6 +449,8 @@ def sync_doc(doc_id: str, title: str):
         store.close()
     log.info("sync %s: synced=%s events=%s errors=%s", doc_id, report.synced,
              [(e.kind, e.machine) for e in report.events], report.errors)
+    if report.head_moved:
+        index_later(doc_id)
     return report
 
 

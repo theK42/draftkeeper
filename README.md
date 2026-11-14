@@ -13,9 +13,17 @@ See [ROADMAP.md](ROADMAP.md) for phases. Implemented so far:
 - **Every save** of a tracked document records a snapshot automatically
   (saves with no edits are skipped). Untracked documents are never touched.
 - **Versions** button: named restore points, imported files, and the last save of each
-  day ("daily restore point"); tick *Show every save* for all. *Open as Copy* (or
-  double-click) opens that version as a new untitled document.
-  The copy keeps the ID, so saving it over the original continues the history (a restore).
+  day ("daily restore point"); tick *Show every save* for all; optional From/to dates.
+  - **Find:** search every version for a word or phrase (ignores case, curly vs straight
+    quotes, dash styles). The summary says where it first appeared, when it was last seen and
+    removed, or that it's still there; rows are marked *First appears here* / *Removed here*;
+    the preview shows the matching passage.
+  - **Open as Copy** (or double-click) opens that version as a new untitled document. The
+    copy keeps the ID, so saving it over the original continues the history (a restore).
+  - **Compare with Current** opens a copy of the current text with the changes since that
+    version shown as tracked changes.
+  - The search index (`search.idx` next to each repo) is a local cache, updated in the
+    background and rebuilt automatically if missing.
 - **Fork detection**: when a tracked document is saved at a new path while its known
   copy still exists, it asks once: *Separate document* (new ID and history, noting
   `Derived-From`) or *Same document* (path remembered, history shared). If every known

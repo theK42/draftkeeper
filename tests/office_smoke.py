@@ -323,6 +323,61 @@ def main(*args):
               chooses() == 1 and reopened is not None
               and reopened.getText().getString() == "PC edit, later!")
         if reopened: reopened.close(True)
+
+        # ---- Phase 4: search and compare ----
+        import threading
+        from draftkeeper.ui import UI as RealUI
+        from draftkeeper.search import SearchIndex
+        doc4 = loadv(novel_path)
+        doc4.getText().setString("Marguerite hid the letter under the floorboard.")
+        doc4.store()
+        time.sleep(1.1)
+        doc4.getText().setString("The floorboard was bare.")
+        doc4.store()
+        for t in threading.enumerate():
+            if t.name == "draftkeeper-index":
+                t.join(60)
+        s = DocumentStore(repo); head_blob = s.history()[0].blob; s.close()
+        check("search index updated in the background after save", SearchIndex(repo).has(head_blob))
+
+        seen = {}
+        class ScriptedBrowser(RealUI):
+            """Builds the real Versions dialog, types a search, then picks Compare."""
+            def _run(self, model, setup=None):
+                dialog = self.smgr.createInstanceWithContext("com.sun.star.awt.UnoControlDialog", self.ctx)
+                dialog.setModel(model)
+                dialog.createPeer(self.toolkit, self.window)
+                setup(dialog)
+                dialog.getControl("query").setText("hid the letter")
+                self._browser_hooks["fill"](dialog)
+                lb = dialog.getControl("list")
+                seen["summary"] = dialog.getControl("summary").getText()
+                seen["rows"] = [lb.getItem(i) for i in range(lb.getItemCount())]
+                pick = [i for i, r in enumerate(seen["rows"]) if r.startswith("▲")]
+                lb.selectItemPos(pick[0] if pick else 0, True)
+                self._browser_hooks["preview"](dialog)
+                seen["preview"] = dialog.getControl("preview").getText()
+                return 3, dialog, None   # as if "Compare with Current" was clicked
+        scripted = ScriptedBrowser(ctx, doc4)
+        office.make_ui = lambda c, d: scripted if d is doc4 else fake
+        compared = office.show_versions(ctx, doc4)
+        office.make_ui = lambda c, d: fake
+        check("search summary says where the phrase was and that it was removed",
+              "is in 1 of" in seen.get("summary", "") and "removed" in seen.get("summary", ""),
+              repr(seen.get("summary")))
+        check("search rows mark appearance and removal",
+              any(r.startswith("▲ First appears here") for r in seen.get("rows", []))
+              and any(r.startswith("▼ Removed here") for r in seen.get("rows", [])),
+              repr(seen.get("rows")))
+        check("preview shows the matching paragraph",
+              "Marguerite hid the letter" in seen.get("preview", ""), repr(seen.get("preview")))
+        n_changes = compared.getRedlines().getCount() if compared is not None else -1
+        check("compare opens an untitled copy with tracked changes; original untouched",
+              compared is not None and compared.getURL() == "" and n_changes > 0
+              and doc4.getText().getString() == "The floorboard was bare." and not doc4.isModified(),
+              "redlines=%d" % n_changes)
+        if compared is not None: compared.close(True)
+        doc4.close(True)
     except Exception:
         check("macro ran without error", False, traceback.format_exc())
     finally:

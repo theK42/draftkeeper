@@ -45,11 +45,19 @@ histories on two machines can be combined later, but it's extra work.
 - Divergence stopgap: newer side's text stays current, other side's edits kept in history
 - When she opens a document: "your other computer has newer work. Load it first?"
 
-## Phase 4: history browser and search
+## Phase 4: history browser and search (built; GUI checks pending)
 
-- Sidebar panel: versions grouped by day, restore points highlighted
-- Full-text search across versions (SQLite FTS), date search
-- Replaces History Info
+- The Versions window became the browser (a dialog, not a sidebar: most of the value for
+  far less work). It replaced History Info back in Phase 2.
+- Full-text search across every version: case-, quote- and dash-insensitive; summary of
+  where a phrase first appeared, was last seen, and when it was removed (or that it's still
+  there); the list marks "First appears here" / "Removed here"; preview shows the match
+- Search index: each distinct paragraph stored once, versions as paragraph lists; a local
+  cache per document (no SQLite, so nothing depends on the Windows build's Python),
+  updated in the background after saves, syncs and imports
+- Date range filter (From / to)
+- Compare with Current: a copy of the current text with changes since the chosen version
+  shown as tracked changes (LibreOffice's Compare Document). Phase 5 builds on this.
 
 ## Phase 5: divergence handling
 
@@ -59,6 +67,7 @@ histories on two machines can be combined later, but it's extra work.
 
 ## Later / maybe
 
+- A real sidebar panel for history (instead of the Versions window)
 - "Work on this chapter separately" / "Put it back" round-trip
 - Linux support and testing
 - Background helper to sync while LibreOffice is closed

@@ -109,60 +109,132 @@ class UI:
         dialog.dispose()
         return code == 1
 
-    def pick_version(self, header: str, load_rows):
-        """Version list. ``load_rows(every_save) -> [(text, key)]``. Returns a key or None."""
-        model = self._dialog("Versions", 300, 214)
-        self._add(model, "FixedText", "header", PositionX=8, PositionY=6, Width=284, Height=10, Label=header)
-        self._add(model, "ListBox", "list", PositionX=8, PositionY=20, Width=284, Height=156, Border=1)
-        self._add(model, "CheckBox", "all", PositionX=8, PositionY=182, Width=120, Height=10,
-                  Label="Show every save")
-        self._add(model, "Button", "open", PositionX=150, PositionY=194, Width=78, Height=14,
-                  Label="Open as Copy", PushButtonType=OK, DefaultButton=True)
-        self._add(model, "Button", "close", PositionX=232, PositionY=194, Width=60, Height=14,
-                  Label="Close", PushButtonType=CANCEL)
+    def browse_versions(self, header: str, provider):
+        """The Versions window: search, date range, list, preview, Open / Compare.
 
-        state = {"keys": []}
+        ``provider`` supplies content:
+          provider.rows(query, every_save, date_from, date_to) -> (summary, [(text, key)])
+          provider.preview(key, query) -> str
+        Dates are ``datetime.date`` or None. Returns ("open" | "compare", key) or None.
+        """
+        import datetime
 
-        def fill(dialog, every_save):
-            rows = load_rows(every_save)
+        W = 340
+        model = self._dialog("Versions", W, 268)
+        add = lambda *a, **k: self._add(model, *a, **k)
+        add("FixedText", "header", PositionX=8, PositionY=6, Width=W - 16, Height=10, Label=header)
+        add("FixedText", "findlabel", PositionX=8, PositionY=22, Width=30, Height=10, Label="Find:")
+        add("Edit", "query", PositionX=40, PositionY=20, Width=190, Height=14)
+        add("Button", "find", PositionX=234, PositionY=20, Width=48, Height=14, Label="Search",
+            DefaultButton=True)
+        add("Button", "clear", PositionX=286, PositionY=20, Width=46, Height=14, Label="Clear")
+        add("FixedText", "fromlabel", PositionX=8, PositionY=40, Width=30, Height=10, Label="From:")
+        add("DateField", "from", PositionX=40, PositionY=38, Width=74, Height=14, Dropdown=True,
+            StrictFormat=False)
+        add("FixedText", "tolabel", PositionX=118, PositionY=40, Width=14, Height=10, Label="to:")
+        add("DateField", "to", PositionX=134, PositionY=38, Width=74, Height=14, Dropdown=True,
+            StrictFormat=False)
+        add("CheckBox", "all", PositionX=216, PositionY=40, Width=116, Height=10, Label="Show every save")
+        add("FixedText", "summary", PositionX=8, PositionY=58, Width=W - 16, Height=26, MultiLine=True)
+        add("ListBox", "list", PositionX=8, PositionY=86, Width=W - 16, Height=118, Border=1)
+        add("FixedText", "preview", PositionX=8, PositionY=208, Width=W - 16, Height=32, MultiLine=True)
+        add("Button", "compare", PositionX=118, PositionY=246, Width=88, Height=14,
+            Label="Compare with Current")
+        add("Button", "open", PositionX=210, PositionY=246, Width=70, Height=14, Label="Open as Copy")
+        add("Button", "close", PositionX=284, PositionY=246, Width=48, Height=14, Label="Close",
+            PushButtonType=CANCEL)
+
+        state = {"keys": [], "query": ""}
+
+        def date_of(dialog, name):
+            ctl = dialog.getControl(name)
+            if ctl.isEmpty():
+                return None
+            d = ctl.getDate()
+            try:
+                return datetime.date(d.Year, d.Month, d.Day)
+            except ValueError:
+                return None
+
+        def refresh_preview(dialog):
+            pos = dialog.getControl("list").getSelectedItemPos()
+            text = ""
+            if 0 <= pos < len(state["keys"]):
+                text = provider.preview(state["keys"][pos], state["query"])
+            dialog.getControl("preview").setText(text)
+
+        def fill(dialog):
+            state["query"] = dialog.getControl("query").getText().strip()
+            summary, rows = provider.rows(
+                state["query"], dialog.getControl("all").getState() == 1,
+                date_of(dialog, "from"), date_of(dialog, "to"))
+            dialog.getControl("summary").setText(summary)
             lb = dialog.getControl("list")
             lb.removeItems(0, lb.getItemCount())
             lb.addItems(tuple(t for t, _ in rows), 0)
             state["keys"] = [k for _, k in rows]
             if rows:
                 lb.selectItemPos(0, True)
+            refresh_preview(dialog)
 
-        class Toggle(unohelper.Base, XItemListener):
-            def __init__(self, dialog):
-                self.dialog = dialog
+        def selected():
+            pos = state["dialog"].getControl("list").getSelectedItemPos()
+            return state["keys"][pos] if 0 <= pos < len(state["keys"]) else None
 
-            def itemStateChanged(self, event):
-                fill(self.dialog, self.dialog.getControl("all").getState() == 1)
-
-            def disposing(self, event):
-                pass
-
-        class DoubleClick(unohelper.Base, XActionListener):
-            def __init__(self, dialog):
-                self.dialog = dialog
+        class Action(unohelper.Base, XActionListener):
+            def __init__(self, fn):
+                self.fn = fn
 
             def actionPerformed(self, event):
-                self.dialog.endDialog(1)
+                self.fn()
 
             def disposing(self, event):
                 pass
 
+        class Changed(unohelper.Base, XItemListener):
+            def __init__(self, fn):
+                self.fn = fn
+
+            def itemStateChanged(self, event):
+                self.fn()
+
+            def disposing(self, event):
+                pass
+
+        def finish(code):
+            if selected() is not None:
+                state["dialog"].endDialog(code)
+
+        def clear():
+            d = state["dialog"]
+            d.getControl("query").setText("")
+            d.getControl("from").setEmpty()
+            d.getControl("to").setEmpty()
+            fill(d)
+
+        # Test seam: lets the headless smoke test drive the real dialog's refresh logic.
+        self._browser_hooks = {"fill": fill, "preview": refresh_preview}
+
         def setup(dialog):
-            fill(dialog, False)
-            dialog.getControl("all").addItemListener(Toggle(dialog))
-            dialog.getControl("list").addActionListener(DoubleClick(dialog))
+            state["dialog"] = dialog
+            dialog.getControl("from").setEmpty()
+            dialog.getControl("to").setEmpty()
+            fill(dialog)
+            dialog.getControl("find").addActionListener(Action(lambda: fill(dialog)))
+            dialog.getControl("clear").addActionListener(Action(clear))
+            dialog.getControl("all").addItemListener(Changed(lambda: fill(dialog)))
+            dialog.getControl("list").addItemListener(Changed(lambda: refresh_preview(dialog)))
+            dialog.getControl("list").addActionListener(Action(lambda: finish(1)))  # double-click
+            dialog.getControl("open").addActionListener(Action(lambda: finish(1)))
+            dialog.getControl("compare").addActionListener(Action(lambda: finish(3)))
+            dialog.getControl("query").setFocus()
 
         code, dialog, _ = self._run(model, setup)
         try:
-            pos = dialog.getControl("list").getSelectedItemPos()
-            if code == 1 and 0 <= pos < len(state["keys"]):
-                return state["keys"][pos]
-            return None
+            key = selected()
+            if key is None:
+                return None
+            return {1: ("open", key), 3: ("compare", key)}.get(code)
         finally:
             dialog.dispose()
 
