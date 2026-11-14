@@ -24,7 +24,7 @@ Platforms: macOS (Apple Silicon) and Windows now; Linux later, untested for now.
 **Daily restore point** is covered by snapshots on save. The version list shows
 the last save of each day alongside named restore points. There is no separate timer.
 
-## Phase 2: ready for her to use on one machine (built; GUI + Windows checks pending)
+## Phase 2: ready for her to use on one machine ✅ (macOS; light testing on Windows)
 
 - Version list: named restore points and end-of-day versions (optionally every save),
   with "Open as copy"
@@ -32,7 +32,8 @@ the last save of each day alongside named restore points. There is no separate t
   "same novel, or a separate document?" (chapter working copies become separate docs,
   linked to the novel)
 - Import her existing "final final" files as backdated history, labeled by filename
-- Test on her Windows PC (may move later if PC time isn't available)
+  (files whose text is already in the history are skipped)
+- Tested lightly on her Windows PC; worked
 
 Until Phase 3, she should use Draftkeeper on **one machine only**. Separate
 histories on two machines can be combined later, but it's extra work.
