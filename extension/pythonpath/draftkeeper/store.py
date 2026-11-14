@@ -20,7 +20,7 @@ import datetime
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.repo import Repo
@@ -110,13 +110,28 @@ class DocumentStore:
         self._maybe_compact()
         return commit.id.decode("ascii")
 
-    def insert_versions(self, versions: Iterable[NewVersion]) -> int:
+    def insert_versions(self, versions: Iterable[NewVersion],
+                        key: Optional[Callable[[bytes], object]] = None) -> int:
         """Add versions at their own timestamps, which may predate existing history.
 
         The history is rebuilt in date order (commit ids change; fine while a
         repo exists on one machine only). Versions identical to their
-        predecessor are kept only if named. Returns how many were added.
+        predecessor are kept only if named. With ``key``, a new version whose
+        key matches any existing snapshot (or an earlier new version) is
+        skipped as a duplicate. Returns how many were added.
         """
+        versions = list(versions)
+        if key is not None:
+            seen = set()
+            for s in self.history():
+                seen.add(key(self.read(s.commit_id)))
+            unique = []
+            for v in sorted(versions, key=lambda v: v.timestamp):
+                k = key(v.content)
+                if k not in seen:
+                    seen.add(k)
+                    unique.append(v)
+            versions = unique
         existing = []
         head = self.head()
         if head is not None:

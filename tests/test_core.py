@@ -14,7 +14,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "extension", "pythonpath"))
 
-from draftkeeper.normalize import extract_text, normalize  # noqa: E402
+from draftkeeper.normalize import extract_text, normalize, text_key  # noqa: E402
 from draftkeeper.locations import ASK, KNOWN, MOVED, Locations  # noqa: E402
 from draftkeeper.store import (KIND_AUTO, KIND_IMPORTED, KIND_MANUAL,  # noqa: E402
                                DocumentStore, NewVersion, version_list)
@@ -201,6 +201,22 @@ class ImportTests(unittest.TestCase):
         self.assertEqual([h.kind for h in hist][2:], [KIND_IMPORTED, KIND_IMPORTED])
         self.assertEqual(self.store.read(hist[0].commit_id), b"today edited")
         self.assertEqual(self.store.read(hist[3].commit_id), b"draft")
+
+    def test_duplicates_skipped_with_key(self):
+        doc = lambda words, meta: make_fodt(["<text:p>%s</text:p>" % words], cycles=meta)
+        key = text_key
+        self.store.snapshot(normalize(doc("Current text.", 1)), when=T0)
+        added = self.store.insert_versions([
+            NewVersion(T0 - 3 * DAY, normalize(doc("Old draft.", 5)), label="v1.odt"),
+            NewVersion(T0 - 2 * DAY, normalize(doc("Old draft.", 9)), label="v1 copy.odt"),
+            NewVersion(T0 - DAY, normalize(doc("Current text.", 7)), label="current.odt"),
+        ], key=key)
+        self.assertEqual(added, 1)
+        self.assertEqual([h.label for h in self.store.history()], ["Saved", "v1.odt"])
+        again = self.store.insert_versions(
+            [NewVersion(T0 - 3 * DAY, normalize(doc("Old draft.", 5)), label="v1.odt")], key=key)
+        self.assertEqual(again, 0)
+        self.assertEqual(len(self.store.history()), 2)
 
     def test_import_into_empty_history_and_trailers_survive(self):
         self.store.snapshot(b"x", kind=KIND_MANUAL, label="Split", when=T0,

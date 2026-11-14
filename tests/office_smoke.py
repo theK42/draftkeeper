@@ -207,6 +207,15 @@ def main(*args):
               added == 2 and count(repo) == before + 2
               and bottom == [("imported", "Novel v2.odt"), ("imported", "Novel v1.odt")]
               and oldest_text == "First draft.", "added=%r bottom=%r text=%r" % (added, bottom, oldest_text))
+
+        # Importing the same files again (plus the novel's current file) adds nothing
+        before = count(repo)
+        stick_copy = os.path.join(stick, "Novel.odt")
+        added = office.import_versions(ctx, novel, files=olds + [stick_copy])
+        last = fake.calls[-1]
+        check("import again: duplicates skipped and reported",
+              added == 0 and count(repo) == before and last[0] == "message"
+              and "3 files were already in the history" in last[1], "added=%r last=%r" % (added, last))
         novel.close(True)
     except Exception:
         check("macro ran without error", False, traceback.format_exc())

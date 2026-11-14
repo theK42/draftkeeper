@@ -112,6 +112,18 @@ def _indent(elem: ET.Element, level: int) -> None:
 _T = "{%s}" % NS_TEXT
 
 
+def text_key(data: bytes) -> str:
+    """Identity of a version as she'd see it: its words, ignoring formatting and metadata.
+
+    Used to spot duplicates when importing old files. Byte comparison isn't
+    enough: the same text saved by different LibreOffice sessions differs in
+    style names, IDs and dates. The trade-off: two old files that differ only
+    in formatting count as one version.
+    """
+    import hashlib
+    return hashlib.sha1(extract_text(data).encode("utf-8")).hexdigest()
+
+
 def extract_text(data: bytes) -> str:
     """Visible text of the document body, one paragraph per line."""
     root = ET.fromstring(data)

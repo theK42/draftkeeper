@@ -14,7 +14,7 @@ from com.sun.star.beans import PropertyValue
 
 from . import paths
 from .locations import ASK, MOVED, Locations, is_tracked_format
-from .normalize import normalize
+from .normalize import normalize, text_key
 from .store import (KIND_AUTO, KIND_IMPORTED, KIND_MANUAL, DocumentStore,
                     NewVersion, version_list)
 
@@ -325,13 +325,26 @@ def import_versions(ctx, doc, files=None) -> int:
 
     store = open_store(get_doc_id(doc))
     try:
-        added = store.insert_versions(versions)
+        added = store.insert_versions(versions, key=text_key)
     finally:
         store.close()
-    log.info("imported %d versions into %s", added, get_doc_id(doc))
-    note = "Imported %d older version%s." % (added, "" if added == 1 else "s")
+    skipped = len(versions) - added
+    log.info("imported %d versions into %s (%d duplicates skipped)", added, get_doc_id(doc), skipped)
+
+    if added == 1:
+        note = "Imported 1 older version."
+    elif added:
+        note = "Imported %d older versions." % added
+    else:
+        note = "Nothing new to import."
+    if skipped == 1:
+        note += " 1 file was already in the history (same text), so it was skipped."
+    elif skipped:
+        note += " %d files were already in the history (same text), so they were skipped." % skipped
     if failed:
         ui.message(note + "\n\nThese files couldn't be opened:\n" + "\n".join(failed))
-    else:
+    elif added:
         ui.notify(note + " See them under Versions.")
+    else:
+        ui.message(note)
     return added
