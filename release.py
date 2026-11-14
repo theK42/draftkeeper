@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = "theK42/draftkeeper"
@@ -28,9 +29,15 @@ UPDATE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-def run(*cmd, **kw):
+def run(*cmd, tries=1, **kw):
     print("$", " ".join(cmd))
-    return subprocess.run(cmd, cwd=ROOT, check=True, text=True, **kw)
+    for attempt in range(tries):
+        try:
+            return subprocess.run(cmd, cwd=ROOT, check=True, text=True, **kw)
+        except subprocess.CalledProcessError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(5)
 
 
 def main():
@@ -47,10 +54,10 @@ def main():
     run("git", "add", "update.xml")
     run("git", "commit", "-m", "Release %s" % tag)
     run("git", "tag", tag)
-    run("git", "push", "origin", tag)
+    run("git", "push", "origin", tag, tries=3)
     run(GH, "release", "create", tag, os.path.join(ROOT, "dist", "Draftkeeper.oxt"),
         "--repo", REPO, "--verify-tag", "--title", "Draftkeeper " + version, "--generate-notes")
-    run("git", "push", "origin", "HEAD:main")
+    run("git", "push", "origin", "HEAD:main", tries=3)
     print("Released %s. Installed copies see it under Tools > Extension Manager > Check for Updates." % tag)
 
 

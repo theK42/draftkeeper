@@ -96,5 +96,13 @@ The last two need LibreOffice installed and closed. Notes from macOS:
 - `unopkg add` can't register Python components here; install through LibreOffice itself
   (double-click the .oxt, or Extension Manager), which is what users do anyway.
 
-Install: double-click `dist/Draftkeeper.oxt`, or *Tools › Extension Manager › Add*. Restart LibreOffice.
+Install: download `Draftkeeper.oxt` from the
+[latest release](https://github.com/theK42/draftkeeper/releases/latest) (or build it), then
+double-click it, or *Tools › Extension Manager › Add*. Restart LibreOffice.
+
+Updates: *Tools › Extension Manager › Check for Updates* offers the newest release
+(installed copies read `update.xml` on main). To publish one, bump `<version>` in
+`extension/description.xml`, commit, and run `python3 release.py`: it builds, writes
+`update.xml`, tags, uploads the release, then pushes main.
+
 Log file: `<data dir>/draftkeeper.log`.
